@@ -1,0 +1,2 @@
+{"timestamp":"2026-08-01T08:00:00Z","payload":{"rate_limits":{"limit_id":"codex","plan_type":"plus","primary":{"used_percent":34,"resets_at":1785600000}}}}
+{"timestamp":"2026-08-01T08:01:00Z","payload":{"rate_limits":{"limit_id":"codex_bengalfox","plan_type":null,"primary":{"used_percent":0,"window_minutes":300,"resets_at":1785600000},"secondary":{"used_percent":0,"window_minutes":10080,"resets_at":1786204800}}}}

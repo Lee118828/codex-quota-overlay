@@ -1,0 +1,4 @@
+.superpowers/
+work/
+*.jsonl
+!tests/fixtures/*.jsonl
