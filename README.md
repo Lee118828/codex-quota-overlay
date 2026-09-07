@@ -1,9 +1,8 @@
 # Codex Quota Overlay
 
-一个 Windows PowerShell/WPF 桌面浮窗，显示 Codex 的两条剩余额度：
+一个 Windows PowerShell/WPF 桌面浮窗，显示 Codex 的每周剩余额度和百分比。
 
-- 外环：5 小时额度（300 分钟）
-- 内环：每周额度（10080 分钟）
+当前公开版本是回滚后的单周额度浮窗；程序会保留拖动、惯性、缩放和摩擦力控制。
 
 程序只读取 `%USERPROFILE%\.codex\sessions` 中的会话日志，不读取或保存账号令牌。
 
@@ -15,7 +14,7 @@
 powershell.exe -ExecutionPolicy Bypass -File .\outputs\CodexQuotaOverlay\Install.ps1
 ```
 
-右键浮窗可刷新、调整大小/摩擦力、启用随 Windows 启动或退出。卸载：
+安装脚本会同时创建 Windows 自启动项和桌面启动快捷方式。右键浮窗可刷新、调整大小/摩擦力、启用随 Windows 启动或退出。卸载：
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\outputs\CodexQuotaOverlay\Uninstall.ps1

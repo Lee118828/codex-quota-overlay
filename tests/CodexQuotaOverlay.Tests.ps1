@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
 $scriptPath = Join-Path $PSScriptRoot '..\outputs\CodexQuotaOverlay\CodexQuotaOverlay.ps1'
 $content = Get-Content -Raw -LiteralPath $scriptPath
+$installPath = Join-Path $PSScriptRoot '..\outputs\CodexQuotaOverlay\Install.ps1'
+$installContent = Get-Content -Raw -LiteralPath $installPath
 
 function Assert-Contains([string]$needle, [string]$name) {
     if ($content.IndexOf($needle, [System.StringComparison]::Ordinal) -lt 0) {
@@ -8,21 +10,20 @@ function Assert-Contains([string]$needle, [string]$name) {
     }
 }
 
-function Assert-NotContains([string]$needle, [string]$name) {
-    if ($content.IndexOf($needle, [System.StringComparison]::Ordinal) -ge 0) {
+function Assert-InstallContains([string]$needle, [string]$name) {
+    if ($installContent.IndexOf($needle, [System.StringComparison]::Ordinal) -lt 0) {
         throw "FAIL: $name"
     }
 }
 
+Assert-InstallContains "GetFolderPath('Desktop')" 'installer creates a desktop launcher path'
+Assert-InstallContains 'CreateShortcut($desktopPath)' 'installer creates the desktop launcher shortcut'
+
 Assert-Contains 'x:Name="PrimaryRing"' 'primary circular gauge path is defined'
-Assert-Contains 'x:Name="SecondaryRing"' 'secondary circular gauge path is defined'
-Assert-Contains 'Text="5H"' 'five-hour gauge is labeled'
-Assert-Contains 'Text="WEEK"' 'weekly gauge is labeled'
+Assert-Contains 'Text="WEEK"' 'single gauge is labeled as a weekly quota'
 Assert-Contains 'function Set-RingArc' 'ring geometry is rendered from remaining percent'
 Assert-Contains '[Windows.Point]::new' 'ring point construction uses WPF point coordinates'
 Assert-Contains 'WeeklyRemaining' 'primary-only quota records are exposed as weekly remaining'
-Assert-Contains 'PrimaryRemaining' 'five-hour quota is exposed as primary remaining'
-Assert-Contains 'SecondaryRemaining' 'weekly quota is exposed as secondary remaining'
 Assert-Contains '$timer.Interval = [TimeSpan]::FromSeconds(4)' 'scheduled refresh remains low frequency'
 Assert-Contains '$refreshItem.Add_Click({ Update-View })' 'manual refresh performs an immediate view update'
 Assert-Contains 'x:Name="CardScale"' 'card has a transform for breathing and squash effects'
@@ -31,7 +32,9 @@ Assert-Contains 'public event EventHandler ClickRequested;' 'physics controller 
 Assert-Contains 'OverlayControlMath.IsDragThresholdExceeded' 'dragging begins at the shared threshold'
 Assert-Contains 'public void SetScalePercent(int value)' 'physics controller accepts scale changes'
 Assert-Contains 'public void SetFriction(int value)' 'physics controller accepts friction changes'
+Assert-Contains 'public void StopMotion()' 'physics controller exposes immediate motion stop'
 Assert-Contains '"ScalePercent":{2},"Friction":{3}' 'settings persist scale and friction'
+Assert-Contains 'OverlayControlMath.FrictionCoefficientFromValue(frictionValue)' 'render physics uses the selected friction'
 Assert-Contains 'CompositionTarget.Rendering +=' 'physics follows WPF render frames'
 Assert-Contains 'SynchronizePhysicalLeftButton();' 'render frame synchronizes physical input before physics'
 Assert-Contains 'WindowFromPoint(point) == overlayHandle' 'fallback accepts only the overlay top-level HWND'
@@ -43,20 +46,6 @@ Assert-Contains '$script:quotaFileCache' 'unchanged session logs are not reparse
 Assert-Contains '<Path x:Name="Trail1"' 'first velocity trail layer is an arc path'
 Assert-Contains '<Path x:Name="Trail2"' 'second velocity trail layer is an arc path'
 Assert-Contains '<Path x:Name="Trail3"' 'third velocity trail layer is an arc path'
-foreach ($removedStopControlArtifact in @(
-        '$stopControlSettingsPath',
-        '[xml]$stopControlXaml',
-        'StopMotionButton',
-        'StopControlFace',
-        'Set-StopControlWindow',
-        'Restore-StopControlWindowPosition',
-        'Save-StopControlWindowPosition',
-        'Register-StopControlWindowDragHandlers',
-        'SuppressPhysicalPressForExternalControl',
-        'externalControlPressActive',
-        'StopMotion()')) {
-    Assert-NotContains $removedStopControlArtifact "removed stop-control artifact '$removedStopControlArtifact'"
-}
 Assert-Contains 'Set-ArcTrailGeometry' 'render frames rebuild the current arc geometry'
 Assert-Contains 'Math.Atan2' 'trail orientation follows reverse velocity'
 Assert-Contains 'trails[i].Opacity' 'trail opacity eases per replacement layer'
@@ -87,6 +76,7 @@ if ($content.IndexOf('controlPanelAutoClosedAt', [System.StringComparison]::Ordi
 if ($content.IndexOf('controlPanelClosingByToggle', [System.StringComparison]::Ordinal) -ge 0) {
     throw 'FAIL: popup closure no longer relies on a setter-scoped flag'
 }
+
 $mouseDownStart = $content.IndexOf('private void OnMouseDown', [System.StringComparison]::Ordinal)
 $mouseMoveStart = $content.IndexOf('private void OnMouseMove', $mouseDownStart, [System.StringComparison]::Ordinal)
 if ($mouseDownStart -lt 0 -or $mouseMoveStart -lt 0) {
@@ -111,7 +101,7 @@ $settingsLoadStart = $content.IndexOf(
     'if (Test-Path -LiteralPath $settingsPath)',
     [System.StringComparison]::Ordinal)
 $controllerCreateStart = $content.IndexOf(
-    '$script:physicsController = [OverlayPhysicsController]::new(',
+    '$physicsController = [OverlayPhysicsController]::new(',
     $settingsLoadStart,
     [System.StringComparison]::Ordinal)
 $settingsLoadBody = $content.Substring(
@@ -130,87 +120,6 @@ if ($settingsLoadBody.IndexOf(
         'Clamp-WindowPosition -scalePercent $initialScalePercent',
         [System.StringComparison]::Ordinal) -lt 0) {
     throw 'FAIL: startup coordinate clamp uses the persisted scale'
-}
-
-$quotaParseErrors = $null
-$quotaScriptAst = [Management.Automation.Language.Parser]::ParseFile(
-    $scriptPath,
-    [ref]$null,
-    [ref]$quotaParseErrors)
-if ($quotaParseErrors.Count -ne 0) {
-    throw 'FAIL: quota script parses successfully for quota selection tests'
-}
-$latestQuotaFunctionAst = $quotaScriptAst.Find(
-    {
-        param($node)
-        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Get-LatestQuota'
-    },
-    $true)
-if ($null -eq $latestQuotaFunctionAst) {
-    throw 'FAIL: Get-LatestQuota remains directly executable for quota selection tests'
-}
-. ([scriptblock]::Create($latestQuotaFunctionAst.Extent.Text))
-
-$quotaFixturePath = Join-Path $PSScriptRoot 'fixtures\quota-primary-over-auxiliary.jsonl'
-$quotaTestHome = Join-Path ([IO.Path]::GetTempPath()) (
-    'CodexQuotaOverlay.QuotaTests.' + [guid]::NewGuid().ToString('N'))
-$originalUserProfile = $env:USERPROFILE
-$originalQuotaFileCache = $script:quotaFileCache
-try {
-    $quotaSessions = Join-Path $quotaTestHome '.codex\sessions\2026\08\01'
-    New-Item -ItemType Directory -Path $quotaSessions -Force | Out-Null
-    Copy-Item -LiteralPath $quotaFixturePath -Destination (
-        Join-Path $quotaSessions 'rollout-fixture.jsonl')
-    $env:USERPROFILE = $quotaTestHome
-    $script:quotaFileCache = @{}
-
-    $selectedQuota = Get-LatestQuota
-
-    if ($selectedQuota.WeeklyRemaining -ne 66) {
-        throw "FAIL: primary codex record wins over newer auxiliary quota bucket (expected 66, got $($selectedQuota.WeeklyRemaining))"
-    }
-    if (-not $selectedQuota.Source.EndsWith(
-            'rollout-fixture.jsonl',
-            [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw 'FAIL: primary codex quota source is retained'
-    }
-}
-finally {
-    $env:USERPROFILE = $originalUserProfile
-    $script:quotaFileCache = $originalQuotaFileCache
-    Remove-Item -LiteralPath $quotaTestHome -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-$dualQuotaFixturePath = Join-Path $PSScriptRoot 'fixtures\quota-dual-window.jsonl'
-$dualQuotaTestHome = Join-Path ([IO.Path]::GetTempPath()) (
-    'CodexQuotaOverlay.DualQuotaTests.' + [guid]::NewGuid().ToString('N'))
-$originalDualUserProfile = $env:USERPROFILE
-$originalDualQuotaFileCache = $script:quotaFileCache
-try {
-    $dualQuotaSessions = Join-Path $dualQuotaTestHome '.codex\sessions\2026\09\04'
-    New-Item -ItemType Directory -Path $dualQuotaSessions -Force | Out-Null
-    Copy-Item -LiteralPath $dualQuotaFixturePath -Destination (
-        Join-Path $dualQuotaSessions 'rollout-dual-fixture.jsonl')
-    $env:USERPROFILE = $dualQuotaTestHome
-    $script:quotaFileCache = @{}
-
-    $dualQuota = Get-LatestQuota
-
-    if ($dualQuota.PrimaryRemaining -ne 88) {
-        throw "FAIL: five-hour window maps from primary 300-minute bucket (expected 88, got $($dualQuota.PrimaryRemaining))"
-    }
-    if ($dualQuota.SecondaryRemaining -ne 66) {
-        throw "FAIL: weekly window maps from secondary 10080-minute bucket (expected 66, got $($dualQuota.SecondaryRemaining))"
-    }
-    if ($dualQuota.WeeklyRemaining -ne 66 -or $dualQuota.FiveHourRemaining -ne 88) {
-        throw 'FAIL: quota aliases preserve weekly and five-hour values'
-    }
-}
-finally {
-    $env:USERPROFILE = $originalDualUserProfile
-    $script:quotaFileCache = $originalDualQuotaFileCache
-    Remove-Item -LiteralPath $dualQuotaTestHome -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $controlMathPath = Join-Path $PSScriptRoot '..\outputs\CodexQuotaOverlay\OverlayControlMath.cs'
@@ -233,24 +142,6 @@ using System.Runtime.InteropServices;
 public static class OverlayTestNativeWindow
 {
     [StructLayout(LayoutKind.Sequential)]
-    private struct Input
-    {
-        public uint Type;
-        public MouseInput Data;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MouseInput
-    {
-        public int Dx;
-        public int Dy;
-        public uint MouseData;
-        public uint Flags;
-        public uint Time;
-        public UIntPtr ExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     public struct Rect
     {
         public int Left;
@@ -259,86 +150,8 @@ public static class OverlayTestNativeWindow
         public int Bottom;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct Point
-    {
-        public int X;
-        public int Y;
-
-        public Point(int x, int y)
-        {
-            X = x;
-            Y = y;
-        }
-    }
-
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetWindowRect(IntPtr handle, out Rect rect);
-
-    [DllImport("user32.dll")]
-    public static extern IntPtr WindowFromPoint(Point point);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool SetCursorPos(int x, int y);
-
-    [DllImport("user32.dll")]
-    public static extern void mouse_event(
-        uint flags,
-        uint dx,
-        uint dy,
-        uint data,
-        UIntPtr extraInfo);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint SendInput(
-        uint inputCount,
-        Input[] inputs,
-        int inputSize);
-
-    public static void SendLeftClick()
-    {
-        Input[] inputs = new[]
-        {
-            new Input { Type = 0, Data = new MouseInput { Flags = 0x0002 } },
-            new Input { Type = 0, Data = new MouseInput { Flags = 0x0004 } }
-        };
-        uint sent = SendInput(
-            (uint)inputs.Length,
-            inputs,
-            Marshal.SizeOf(typeof(Input)));
-        if (sent != inputs.Length)
-        {
-            throw new InvalidOperationException(
-                "SendInput left click failed: " + Marshal.GetLastWin32Error());
-        }
-    }
-
-    public static void SendLeftMouseDown()
-    {
-        SendMouseInput(0x0002);
-    }
-
-    public static void SendLeftMouseUp()
-    {
-        SendMouseInput(0x0004);
-    }
-
-    private static void SendMouseInput(uint flags)
-    {
-        Input[] inputs = new[]
-        {
-            new Input { Type = 0, Data = new MouseInput { Flags = flags } }
-        };
-        uint sent = SendInput(
-            (uint)inputs.Length,
-            inputs,
-            Marshal.SizeOf(typeof(Input)));
-        if (sent != inputs.Length)
-        {
-            throw new InvalidOperationException(
-                "SendInput mouse input failed: " + Marshal.GetLastWin32Error());
-        }
-    }
 
     public static Rect ReadRect(IntPtr handle)
     {
@@ -389,13 +202,7 @@ $controlPanelXamlReader = [System.Xml.XmlNodeReader]::new(
     [xml]$controlPanelXamlMatch.Groups['xaml'].Value)
 $loadedControlPanel = [Windows.Markup.XamlReader]::Load($controlPanelXamlReader)
 
-foreach ($name in @(
-        'VisualGroup',
-        'UserScale',
-        'Trail1',
-        'Trail2',
-        'Trail3',
-        'CardScale')) {
+foreach ($name in @('VisualGroup', 'UserScale', 'Trail1', 'Trail2', 'Trail3', 'CardScale')) {
     Assert-Equal ($null -ne $loadedWindow.FindName($name)) $true "window XAML exposes $name"
 }
 Assert-Equal $loadedControlPanel.Name 'ControlPanel' 'control-panel XAML exposes ControlPanel'
@@ -432,6 +239,7 @@ Assert-Near ([OverlayControlMath]::FrictionCoefficientFromValue(-100)) -2.00 0.0
 Assert-Near ([OverlayControlMath]::FrictionCoefficientFromValue(0)) 0.35 0.0001 'minimum friction mapping'
 Assert-Near ([OverlayControlMath]::FrictionCoefficientFromValue(40)) 1.65 0.0001 'default friction mapping'
 Assert-Near ([OverlayControlMath]::FrictionCoefficientFromValue(100)) 4.50 0.0001 'maximum friction mapping'
+
 function New-ControllerFixture([int]$scalePercent = 100, [int]$friction = 40) {
     $window = [Windows.Window]::new()
     $window.Width = 292
@@ -462,7 +270,6 @@ function New-ControllerFixture([int]$scalePercent = 100, [int]$friction = 40) {
     return [pscustomobject]@{
         Window = $window
         Controller = $controller
-        UserScale = $userScale
         SettingsPath = $settingsPath
     }
 }
@@ -539,6 +346,58 @@ function Invoke-ControllerRendering($fixture, [double]$deltaSeconds = 0.02) {
         [Reflection.BindingFlags]::Instance -bor [Reflection.BindingFlags]::NonPublic)
     if ($null -eq $method) { throw 'FAIL: controller render synchronization remains directly executable' }
     [void]$method.Invoke($fixture.Controller, @($null, [EventArgs]::Empty))
+}
+
+$stopMotionWindow = [Windows.Window]::new()
+$stopMotionWindow.Width = 292
+$stopMotionWindow.Height = 292
+$stopMotionArea = [System.Windows.SystemParameters]::WorkArea
+$stopMotionWindow.Left = $stopMotionArea.Left + 200
+$stopMotionWindow.Top = $stopMotionArea.Top + 200
+$stopMotionSettingsPath = Join-Path ([IO.Path]::GetTempPath()) (
+    'CodexQuotaOverlay.StopMotion.Tests.' + [guid]::NewGuid().ToString('N') + '.json')
+$stopMotionTrails = @(
+    [Windows.Shapes.Path]::new()
+    [Windows.Shapes.Path]::new()
+    [Windows.Shapes.Path]::new()
+)
+foreach ($trail in $stopMotionTrails) {
+    $trail.Data = [Windows.Media.Geometry]::Parse('M 0,0 L 10,0')
+    $trail.Opacity = 0.5
+}
+$stopMotionController = [OverlayPhysicsController]::new(
+    $stopMotionWindow,
+    [Windows.Media.ScaleTransform]::new(),
+    [Windows.Media.ScaleTransform]::new(),
+    64.0,
+    $stopMotionSettingsPath,
+    100,
+    40,
+    $stopMotionTrails[0],
+    $stopMotionTrails[1],
+    $stopMotionTrails[2])
+try {
+    Set-ControllerField $stopMotionController 'velocityX' 1200.0
+    Set-ControllerField $stopMotionController 'velocityY' ([double]-900.0)
+    Set-ControllerField $stopMotionController 'moving' $true
+
+    $stopMotionController.StopMotion()
+
+    Assert-Near (Get-ControllerField $stopMotionController 'velocityX') 0.0 0.0001 'stop motion clears horizontal velocity'
+    Assert-Near (Get-ControllerField $stopMotionController 'velocityY') 0.0 0.0001 'stop motion clears vertical velocity'
+    Assert-Equal (Get-ControllerField $stopMotionController 'moving') $false 'stop motion clears moving state'
+    foreach ($trail in $stopMotionTrails) {
+        Assert-Equal ($null -eq $trail.Data) $true 'stop motion clears trail geometry'
+        Assert-Near $trail.Opacity 0.0 0.0001 'stop motion clears trail opacity'
+    }
+    Assert-Equal ([IO.File]::Exists($stopMotionSettingsPath)) $false 'stop motion does not write settings'
+}
+finally {
+    $stopMotionController.Dispose()
+    $stopMotionWindow.Close()
+    if ([IO.File]::Exists($stopMotionSettingsPath)) {
+        [IO.File]::Delete($stopMotionSettingsPath)
+    }
 }
 
 $negativeFrictionFixture = New-ControllerFixture
@@ -939,78 +798,6 @@ function Invoke-PreviewMouseLeftButtonDown($element) {
         [Windows.Input.MouseButton]::Left)
     $eventArgs.RoutedEvent = [Windows.UIElement]::PreviewMouseLeftButtonDownEvent
     $element.RaiseEvent($eventArgs)
-    return $eventArgs
-}
-
-function Invoke-RealWpfLeftClick($element) {
-    $center = $element.PointToScreen([Windows.Point]::new(
-            $element.ActualWidth / 2.0,
-            $element.ActualHeight / 2.0))
-    $originalCursor = [System.Windows.Forms.Cursor]::Position
-    try {
-        if (-not [OverlayTestNativeWindow]::SetCursorPos(
-                [int][Math]::Round($center.X),
-                [int][Math]::Round($center.Y))) {
-            throw 'FAIL: real WPF gesture can position the cursor over the stop-motion button'
-        }
-        Start-Sleep -Milliseconds 50
-        [OverlayTestNativeWindow]::SendLeftClick()
-        [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke(
-            [Action]{},
-            [Windows.Threading.DispatcherPriority]::Background)
-    }
-    finally {
-        [void][OverlayTestNativeWindow]::SetCursorPos($originalCursor.X, $originalCursor.Y)
-    }
-}
-
-function Invoke-RealWpfDrag($element, [int]$horizontalOffset, [int]$verticalOffset) {
-    $dragWindow = [Windows.Window]::GetWindow($element)
-    $center = $element.PointToScreen([Windows.Point]::new(
-            $element.ActualWidth / 2.0,
-            $element.ActualHeight / 2.0))
-    $originalCursor = [System.Windows.Forms.Cursor]::Position
-    try {
-        if (-not [OverlayTestNativeWindow]::SetCursorPos(
-                [int][Math]::Round($center.X),
-                [int][Math]::Round($center.Y))) {
-            throw 'FAIL: real WPF drag can position the cursor over the stop-motion button'
-        }
-        Start-Sleep -Milliseconds 50
-        [OverlayTestNativeWindow]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 30
-        $downEvent = [Windows.Input.MouseButtonEventArgs]::new(
-            [Windows.Input.InputManager]::Current.PrimaryMouseDevice,
-            [Environment]::TickCount,
-            [Windows.Input.MouseButton]::Left)
-        $downEvent.RoutedEvent = [Windows.UIElement]::PreviewMouseLeftButtonDownEvent
-        $dragWindow.RaiseEvent($downEvent)
-        [OverlayTestNativeWindow]::mouse_event(
-            0x0001,
-            [uint32]$horizontalOffset,
-            [uint32]$verticalOffset,
-            0,
-            [UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 50
-        $moveEvent = [Windows.Input.MouseEventArgs]::new(
-            [Windows.Input.InputManager]::Current.PrimaryMouseDevice,
-            [Environment]::TickCount)
-        $moveEvent.RoutedEvent = [Windows.UIElement]::MouseMoveEvent
-        $dragWindow.RaiseEvent($moveEvent)
-        $upEvent = [Windows.Input.MouseButtonEventArgs]::new(
-            [Windows.Input.InputManager]::Current.PrimaryMouseDevice,
-            [Environment]::TickCount,
-            [Windows.Input.MouseButton]::Left)
-        $upEvent.RoutedEvent = [Windows.UIElement]::PreviewMouseLeftButtonUpEvent
-        $dragWindow.RaiseEvent($upEvent)
-        [OverlayTestNativeWindow]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-        [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke(
-            [Action]{},
-            [Windows.Threading.DispatcherPriority]::Background)
-    }
-    finally {
-        [void][OverlayTestNativeWindow]::SetCursorPos($originalCursor.X, $originalCursor.Y)
-    }
 }
 
 function Invoke-ControlPanelCapturedOutsideMouseDown(
@@ -1137,9 +924,7 @@ $viewFunctionAsts = foreach ($functionName in $viewFunctionNames) {
 
 function Get-LatestQuota {
     return [pscustomobject]@{
-        PrimaryRemaining = 64.2
-        SecondaryRemaining = 38.7
-        WeeklyRemaining = 38.7
+        WeeklyRemaining = 64.2
         UpdatedAt = [datetime]::new(2026, 7, 28, 12, 34, 56)
     }
 }
@@ -1150,8 +935,6 @@ $statusWindow = [Windows.Markup.XamlReader]::Load($statusWindowXamlReader)
 try {
     $primaryPercent = $statusWindow.FindName('PrimaryPercent')
     $primaryRing = $statusWindow.FindName('PrimaryRing')
-    $secondaryPercent = $statusWindow.FindName('SecondaryPercent')
-    $secondaryRing = $statusWindow.FindName('SecondaryRing')
     $ringGlow = $statusWindow.FindName('RingGlow')
     $trail1 = $statusWindow.FindName('Trail1')
     $trail2 = $statusWindow.FindName('Trail2')
@@ -1159,7 +942,6 @@ try {
     $status = $statusWindow.FindName('Status')
     $script:lastQuota = $null
     $script:lastPrimaryRemaining = $null
-    $script:lastSecondaryRemaining = $null
 
     Update-View
 
@@ -1182,7 +964,6 @@ try {
     function Get-LatestQuota { return $null }
     $script:lastQuota = $null
     $script:lastPrimaryRemaining = $null
-    $script:lastSecondaryRemaining = $null
 
     Update-View
 
@@ -1197,89 +978,6 @@ try {
 }
 finally {
     $statusWindow.Close()
-}
-
-$timerTickInvocation = $scriptAst.Find(
-    {
-        param($node)
-        $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
-            $node.Member.Value -eq 'Add_Tick' -and
-            $node.Expression.Extent.Text -eq '$timer'
-    },
-    $true)
-if ($null -eq $timerTickInvocation) {
-    throw 'FAIL: refresh timer tick remains directly executable for refresh tests'
-}
-$timerTickScriptText = (
-    $timerTickInvocation.Arguments[0].ScriptBlock.EndBlock.Statements |
-        ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
-$refreshQuotaHome = Join-Path ([IO.Path]::GetTempPath()) (
-    'CodexQuotaOverlay.RefreshTests.' + [guid]::NewGuid().ToString('N'))
-$refreshQuotaPath = Join-Path $refreshQuotaHome '.codex\sessions\2026\08\01\refresh-fixture.jsonl'
-$originalRefreshUserProfile = $env:USERPROFILE
-$originalRefreshQuotaFileCache = $script:quotaFileCache
-$originalTestCodexRunning = ${function:Test-CodexRunning}
-$refreshWindow = [pscustomobject]@{ IsVisible = $true }
-$refreshWindow | Add-Member -MemberType ScriptMethod -Name Show -Value { $this.IsVisible = $true }
-$refreshWindow | Add-Member -MemberType ScriptMethod -Name Hide -Value { $this.IsVisible = $false }
-try {
-    New-Item -ItemType Directory -Path (Split-Path -Parent $refreshQuotaPath) -Force | Out-Null
-    [IO.File]::WriteAllText(
-        $refreshQuotaPath,
-        '{"timestamp":"2026-08-01T08:00:00Z","payload":{"rate_limits":{"limit_id":"codex","plan_type":"plus","primary":{"used_percent":34,"resets_at":1785600000}}}}')
-    $env:USERPROFILE = $refreshQuotaHome
-    $script:quotaFileCache = @{}
-    $global:CodexQuotaOverlayRefreshQuotaPath = $refreshQuotaPath
-    $global:CodexQuotaOverlayRefreshUpdateView = {
-        $global:CodexQuotaOverlayRefreshUpdateCalls++
-        $event = Get-Content -Raw -LiteralPath $global:CodexQuotaOverlayRefreshQuotaPath |
-            ConvertFrom-Json -ErrorAction Stop
-        $remaining = 100 - [double]$event.payload.rate_limits.primary.used_percent
-        $global:CodexQuotaOverlayRefreshPrimaryPercent.Text = "$remaining%"
-    }
-    function Test-CodexRunning { return $false }
-    $timerTickScript = [scriptblock]::Create(
-        $timerTickScriptText.Replace(
-            'Update-View',
-            '& $global:CodexQuotaOverlayRefreshUpdateView'))
-
-    $refreshWindowXamlReader = [System.Xml.XmlNodeReader]::new(
-        [xml]$windowXamlMatch.Groups['xaml'].Value)
-    $refreshWindowForTest = [Windows.Markup.XamlReader]::Load($refreshWindowXamlReader)
-    try {
-        $global:CodexQuotaOverlayRefreshPrimaryPercent =
-            $refreshWindowForTest.FindName('PrimaryPercent')
-        $global:CodexQuotaOverlayRefreshUpdateCalls = 0
-
-        & $timerTickScript
-        Assert-Equal $global:CodexQuotaOverlayRefreshUpdateCalls 1 'timer invokes Update-View while Codex process detection is false'
-        Assert-Equal $global:CodexQuotaOverlayRefreshPrimaryPercent.Text '66%' 'timer refresh renders quota while Codex process detection is false'
-
-        [IO.File]::WriteAllText(
-            $refreshQuotaPath,
-            '{"timestamp":"2026-08-01T08:02:00Z","payload":{"rate_limits":{"limit_id":"codex","plan_type":"plus","primary":{"used_percent":55,"resets_at":1785600000}}}}')
-        & $timerTickScript
-        Assert-Equal $global:CodexQuotaOverlayRefreshUpdateCalls 2 'timer invokes Update-View after the quota file changes while Codex process detection is false'
-        Assert-Equal $global:CodexQuotaOverlayRefreshPrimaryPercent.Text '45%' 'timer refresh renders changed quota file while Codex process detection is false'
-    }
-    finally {
-        $refreshWindowForTest.Close()
-    }
-}
-finally {
-    $env:USERPROFILE = $originalRefreshUserProfile
-    $script:quotaFileCache = $originalRefreshQuotaFileCache
-    if ($null -eq $originalTestCodexRunning) {
-        Remove-Item -LiteralPath function:Test-CodexRunning -ErrorAction SilentlyContinue
-    } else {
-        Set-Item -LiteralPath function:Test-CodexRunning -Value $originalTestCodexRunning
-    }
-    Remove-Variable -Scope Global -Name @(
-        'CodexQuotaOverlayRefreshPrimaryPercent',
-        'CodexQuotaOverlayRefreshQuotaPath',
-        'CodexQuotaOverlayRefreshUpdateCalls',
-        'CodexQuotaOverlayRefreshUpdateView') -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $refreshQuotaHome -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $settingsWriterFixture = New-ControllerFixture

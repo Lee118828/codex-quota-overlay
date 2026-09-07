@@ -43,167 +43,38 @@ function Get-LatestQuota {
             continue
         }
 
-        # Keep one best record per file. Account-level `limit_id=codex` data
-        # always wins; dual-window auxiliary data is only a fallback.
-        $fileCandidates = @()
+        $fileRecord = $null
         $lines = @(Get-Content -LiteralPath $file.FullName -Tail 1200 -ErrorAction SilentlyContinue)
-        foreach ($line in $lines) {
-            if ($line -notmatch '"rate_limits"') { continue }
-            try { $event = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
-            $limits = $null
-            if ($null -ne $event.payload) { $limits = $event.payload.rate_limits }
-            if ($null -eq $limits) { $limits = $event.rate_limits }
-            if ($null -eq $limits) { continue }
-            $primaryBucket = $limits.primary
-            $secondaryBucket = $limits.secondary
-            if ($null -eq $primaryBucket -and $null -eq $secondaryBucket) { continue }
-
-            $fiveHourBucket = $null
-            $weeklyBucket = $null
-            foreach ($bucket in @($primaryBucket, $secondaryBucket)) {
-                if ($null -eq $bucket) { continue }
-                $windowMinutes = 0
-                try { $windowMinutes = [int]$bucket.window_minutes } catch { $windowMinutes = 0 }
-                if ($windowMinutes -eq 300 -and $null -eq $fiveHourBucket) {
-                    $fiveHourBucket = $bucket
-                } elseif ($windowMinutes -eq 10080 -and $null -eq $weeklyBucket) {
-                    $weeklyBucket = $bucket
-                }
-            }
-
-            # The original contract had primary=5h and secondary=weekly. Keep
-            # that mapping for old logs that predate window_minutes metadata.
-            if ($null -eq $fiveHourBucket -and $null -eq $weeklyBucket -and
-                $null -ne $primaryBucket -and $null -ne $secondaryBucket) {
-                $fiveHourBucket = $primaryBucket
-                $weeklyBucket = $secondaryBucket
-            }
-
-            # A one-bucket record without metadata is the later weekly-only
-            # format. Do not manufacture a 5-hour value from it.
-            if ($null -eq $fiveHourBucket -and $null -eq $weeklyBucket) {
-                if ($null -ne $primaryBucket) { $weeklyBucket = $primaryBucket }
-                elseif ($null -ne $secondaryBucket) { $weeklyBucket = $secondaryBucket }
-            }
-
-            # If only one side carries window metadata, the other side is the
-            # remaining legacy bucket and can still be mapped safely.
-            if ($null -ne $fiveHourBucket -and $null -eq $weeklyBucket -and
-                $null -ne $secondaryBucket -and $secondaryBucket -ne $fiveHourBucket) {
-                $weeklyBucket = $secondaryBucket
-            }
-            if ($null -ne $weeklyBucket -and $null -eq $fiveHourBucket -and
-                $null -ne $primaryBucket -and $primaryBucket -ne $weeklyBucket) {
-                $fiveHourBucket = $primaryBucket
-            }
-
-            $hasFiveHour = $null -ne $fiveHourBucket -and $null -ne $fiveHourBucket.used_percent
-            $hasWeekly = $null -ne $weeklyBucket -and $null -ne $weeklyBucket.used_percent
-            if (-not $hasFiveHour -and -not $hasWeekly) { continue }
-
-            $isPrimaryCodex = [string]$limits.limit_id -ceq 'codex'
-            $isDualWindow = $hasFiveHour -and $hasWeekly
-            if (-not $isPrimaryCodex -and -not $isDualWindow -and $null -eq $limits.plan_type) { continue }
+        for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+            if ($lines[$i] -notmatch '"rate_limits"') { continue }
+            try { $event = $lines[$i] | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            $limits = $event.payload.rate_limits
+            if ($null -eq $limits.primary) { continue }
+            $isCurrentQuotaShape = $limits.limit_id -eq 'codex' -or $null -ne $limits.plan_type
+            if (-not $isCurrentQuotaShape) { continue }
             try { $timestamp = [DateTimeOffset]::Parse([string]$event.timestamp).LocalDateTime } catch { $timestamp = $file.LastWriteTime }
-
-            $fiveHourUsed = $null
-            $fiveHourReset = $null
-            if ($hasFiveHour) {
-                try {
-                    $fiveHourUsed = [double]$fiveHourBucket.used_percent
-                    $fiveHourReset = [long]$fiveHourBucket.resets_at
-                } catch { $hasFiveHour = $false }
-            }
-            $weeklyUsed = $null
-            $weeklyReset = $null
-            if ($hasWeekly) {
-                try {
-                    $weeklyUsed = [double]$weeklyBucket.used_percent
-                    $weeklyReset = [long]$weeklyBucket.resets_at
-                } catch { $hasWeekly = $false }
-            }
-            if (-not $hasFiveHour -and -not $hasWeekly) { continue }
-            $isDualWindow = $hasFiveHour -and $hasWeekly
-
-            $rank = 0
-            if ($isDualWindow) { $rank += 2 }
-            if ($isPrimaryCodex) { $rank += 1 }
-            $fileCandidates += [pscustomobject]@{
+            $fileRecord = [pscustomobject]@{
                 Timestamp      = $timestamp
-                FiveHourUsed   = $fiveHourUsed
-                FiveHourReset  = $fiveHourReset
-                WeeklyUsed     = $weeklyUsed
-                WeeklyReset    = $weeklyReset
-                HasFiveHour    = $hasFiveHour
-                HasWeekly      = $hasWeekly
-                IsDualWindow   = $isDualWindow
-                IsPrimaryCodex = $isPrimaryCodex
-                Rank           = $rank
+                WeeklyUsed     = [double]$limits.primary.used_percent
+                WeeklyReset    = [long]$limits.primary.resets_at
                 Source         = $file.FullName
             }
+            break
         }
-
-        $filePrimaryRecords = @($fileCandidates | Where-Object { $_.IsPrimaryCodex })
-        if ($filePrimaryRecords.Count -gt 0) {
-            $fileDualPrimaryRecords = @($filePrimaryRecords | Where-Object { $_.IsDualWindow })
-            $fileSelection = if ($fileDualPrimaryRecords.Count -gt 0) {
-                $fileDualPrimaryRecords
-            } else {
-                $filePrimaryRecords
-            }
-        } else {
-            $fileDualRecords = @($fileCandidates | Where-Object { $_.IsDualWindow })
-            $fileSelection = if ($fileDualRecords.Count -gt 0) { $fileDualRecords } else { $fileCandidates }
-        }
-        $fileRecord = $fileSelection |
-            Sort-Object -Property @{Expression='Timestamp';Descending=$true} |
-            Select-Object -First 1
         $script:quotaFileCache[$file.FullName] = [pscustomobject]@{ Stamp = $stamp; Record = $fileRecord }
         if ($null -ne $fileRecord) { $records += $fileRecord }
     }
 
     if ($records.Count -eq 0) { return $null }
 
-    # Prefer account-level codex records. Auxiliary buckets are only a
-    # fallback when no account-level record exists at all.
-    $codexRecords = @($records | Where-Object { $_.IsPrimaryCodex })
-    if ($codexRecords.Count -gt 0) {
-        $codexDualRecords = @($codexRecords | Where-Object { $_.IsDualWindow })
-        $candidateRecords = if ($codexDualRecords.Count -gt 0) { $codexDualRecords } else { $codexRecords }
-        $latest = $candidateRecords | Sort-Object Timestamp -Descending | Select-Object -First 1
-    } else {
-        $dualRecords = @($records | Where-Object { $_.IsDualWindow })
-        $candidateRecords = if ($dualRecords.Count -gt 0) { $dualRecords } else { $records }
-        $latest = $candidateRecords | Sort-Object Timestamp -Descending | Select-Object -First 1
-    }
+    $latest = $records | Sort-Object Timestamp -Descending | Select-Object -First 1
 
-    $primaryRemaining = $null
-    $primaryReset = $null
-    if ($latest.HasFiveHour) {
-        $primaryRemaining = [Math]::Max(0, [Math]::Min(100, 100 - [double]$latest.FiveHourUsed))
-        if ($null -ne $latest.FiveHourReset) {
-            $primaryReset = [DateTimeOffset]::FromUnixTimeSeconds([long]$latest.FiveHourReset).LocalDateTime
-        }
-    }
-    $secondaryRemaining = $null
-    $secondaryReset = $null
-    if ($latest.HasWeekly) {
-        $secondaryRemaining = [Math]::Max(0, [Math]::Min(100, 100 - [double]$latest.WeeklyUsed))
-        if ($null -ne $latest.WeeklyReset) {
-            $secondaryReset = [DateTimeOffset]::FromUnixTimeSeconds([long]$latest.WeeklyReset).LocalDateTime
-        }
-    }
+    $weeklyRemaining = [Math]::Max(0, [Math]::Min(100, 100 - [double]$latest.WeeklyUsed))
     return [pscustomobject]@{
-        PrimaryRemaining   = $primaryRemaining
-        SecondaryRemaining = $secondaryRemaining
-        FiveHourRemaining   = $primaryRemaining
-        WeeklyRemaining     = $secondaryRemaining
-        PrimaryReset        = $primaryReset
-        SecondaryReset      = $secondaryReset
-        FiveHourReset       = $primaryReset
-        WeeklyReset         = $secondaryReset
-        UpdatedAt           = $latest.Timestamp
-        Source              = $latest.Source
+        WeeklyRemaining    = $weeklyRemaining
+        WeeklyReset        = [DateTimeOffset]::FromUnixTimeSeconds([long]$latest.WeeklyReset).LocalDateTime
+        UpdatedAt          = $latest.Timestamp
+        Source             = $latest.Source
     }
 }
 
@@ -468,6 +339,16 @@ public sealed class OverlayPhysicsController : IDisposable
         frictionValue = OverlayControlMath.ClampFriction(value);
         StopInertia();
         SavePosition();
+    }
+
+    public void StopMotion()
+    {
+        StopInertia();
+        for (int i = 0; i < trails.Length; i++)
+        {
+            SetArcTrailGeometry(trails[i], 0.0);
+            trails[i].Opacity = 0.0;
+        }
     }
 
     public bool IsCursorOverOverlayWindow()
@@ -820,24 +701,20 @@ function Test-CodexRunning {
         <Border.RenderTransform><ScaleTransform x:Name="CardScale" ScaleX="1" ScaleY="1"/></Border.RenderTransform>
         <Canvas Width="146" Height="146">
           <Ellipse Canvas.Left="5" Canvas.Top="5" Width="136" Height="136" Stroke="#18FFFFFF" StrokeThickness="1"/>
-          <Ellipse Canvas.Left="5" Canvas.Top="5" Width="136" Height="136" Stroke="#FF252D36" StrokeThickness="10"/>
-          <Ellipse Canvas.Left="22" Canvas.Top="22" Width="102" Height="102" Stroke="#FF252D36" StrokeThickness="8"/>
+          <Ellipse Canvas.Left="9" Canvas.Top="9" Width="128" Height="128" Stroke="#FF252D36" StrokeThickness="12"/>
           <Path x:Name="RingGlow" Stroke="#FF38C985" StrokeThickness="17" Opacity="0.42"
                 StrokeStartLineCap="Round" StrokeEndLineCap="Round">
             <Path.Effect><BlurEffect Radius="10"/></Path.Effect>
           </Path>
-          <Path x:Name="PrimaryRing" Stroke="#FF38C985" StrokeThickness="10" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-          <Path x:Name="SecondaryRing" Stroke="#FF38C985" StrokeThickness="8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+          <Path x:Name="PrimaryRing" Stroke="#FF38C985" StrokeThickness="11" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
           <Path Data="M 33,40 C 53,16 94,10 116,34" Stroke="#4AFFFFFF" StrokeThickness="2"
-                 StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-          <TextBlock Canvas.Left="0" Canvas.Top="46" Width="146" Text="5H" TextAlignment="Center"
-                      Foreground="#FF9BA7B5" FontSize="10" FontWeight="SemiBold"/>
+                StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+          <TextBlock Canvas.Left="0" Canvas.Top="48" Width="146" Text="WEEK" TextAlignment="Center"
+                     Foreground="#FF9BA7B5" FontSize="10" FontWeight="SemiBold"/>
           <TextBlock x:Name="PrimaryPercent" Canvas.Left="0" Canvas.Top="61" Width="146" TextAlignment="Center"
-                      Foreground="#FF38C985" FontSize="29" FontWeight="Bold"/>
-          <TextBlock x:Name="SecondaryPercent" Canvas.Left="0" Canvas.Top="92" Width="146" Text="WEEK" TextAlignment="Center"
-                      Foreground="#FFB7BEC8" FontSize="11" FontWeight="SemiBold"/>
+                     Foreground="#FF38C985" FontSize="29" FontWeight="Bold"/>
           <TextBlock x:Name="Status" Canvas.Left="0" Canvas.Top="106" Width="146" TextAlignment="Center"
-                      Foreground="#FF687483" FontSize="9"/>
+                     Foreground="#FF687483" FontSize="9"/>
         </Canvas>
       </Border>
     </Grid>
@@ -963,21 +840,17 @@ $trail2 = $window.FindName('Trail2')
 $trail3 = $window.FindName('Trail3')
 $primaryPercent = $window.FindName('PrimaryPercent')
 $primaryRing = $window.FindName('PrimaryRing')
-$secondaryPercent = $window.FindName('SecondaryPercent')
-$secondaryRing = $window.FindName('SecondaryRing')
 $ringGlow = $window.FindName('RingGlow')
 $status = $window.FindName('Status')
 $scaleDown = $controlPanel.FindName('ScaleDown')
 $scaleUp = $controlPanel.FindName('ScaleUp')
 $scaleDown100 = $controlPanel.FindName('ScaleDown100')
 $scaleUp100 = $controlPanel.FindName('ScaleUp100')
-
 $scaleValue = $controlPanel.FindName('ScaleValue')
 $frictionSlider = $controlPanel.FindName('FrictionSlider')
 $frictionValue = $controlPanel.FindName('FrictionValue')
 $lastQuota = $null
 $lastPrimaryRemaining = $null
-$lastSecondaryRemaining = $null
 $visualInset = 64.0
 $script:controlsLoading = $true
 $script:syncingControlState = $false
@@ -1182,48 +1055,21 @@ function Update-View {
     if ($null -ne $quota) { $script:lastQuota = $quota }
     if ($null -eq $script:lastQuota) {
         $primaryPercent.Text = '--%'
-        $secondaryPercent.Text = 'WEEK --%'
         $status.Text = "Waiting for data $statusSeparator $leftClickSettingsCue"
         Set-RingArc $primaryRing 64 0
-        Set-RingArc $secondaryRing 51 0
         $ringGlow.Data = $primaryRing.Data
         return
     }
     $q = $script:lastQuota
-    $fiveHour = $q.PrimaryRemaining
-    if ($null -eq $fiveHour) { $fiveHour = $q.FiveHourRemaining }
-    $weekly = $q.SecondaryRemaining
-    if ($null -eq $weekly) { $weekly = $q.WeeklyRemaining }
-
-    $p = $null
-    if ($null -ne $fiveHour) { $p = [Math]::Round([double]$fiveHour, 1) }
-    $s = $null
-    if ($null -ne $weekly) { $s = [Math]::Round([double]$weekly, 1) }
+    $p = [Math]::Round($q.WeeklyRemaining, 1)
     $script:lastPrimaryRemaining = $p
-    $script:lastSecondaryRemaining = $s
-    $primaryPercent.Text = if ($null -eq $p) { '--%' } else { "$p%" }
-    $secondaryPercent.Text = if ($null -eq $s) { 'WEEK --%' } else { "WEEK $s%" }
-    Set-RingArc $primaryRing 64 $(if ($null -eq $p) { 0 } else { $p })
-    Set-RingArc $secondaryRing 51 $(if ($null -eq $s) { 0 } else { $s })
+    $primaryPercent.Text = "$p%"
+    Set-RingArc $primaryRing 64 $p
     $ringGlow.Data = $primaryRing.Data
-    if ($null -ne $p) {
-        $pc = Get-QuotaColor $p
-        $primaryRing.Stroke = $pc; $primaryPercent.Foreground = $pc
-        $ringGlow.Stroke = $pc
-    } else {
-        $pc = '#FF687483'
-        $primaryRing.Stroke = $pc; $primaryPercent.Foreground = $pc
-        $ringGlow.Stroke = $pc
-    }
-    if ($null -ne $s) {
-        $sc = Get-QuotaColor $s
-        $secondaryRing.Stroke = $sc; $secondaryPercent.Foreground = $sc
-    } else {
-        $sc = '#FF687483'
-        $secondaryRing.Stroke = $sc; $secondaryPercent.Foreground = $sc
-    }
-    $trailColor = if ($null -ne $p) { $pc } elseif ($null -ne $s) { $sc } else { '#FF687483' }
-    $trail1.Stroke = $trailColor; $trail2.Stroke = $trailColor; $trail3.Stroke = $trailColor
+    $pc = Get-QuotaColor $p
+    $primaryRing.Stroke = $pc; $primaryPercent.Foreground = $pc
+    $ringGlow.Stroke = $pc
+    $trail1.Stroke = $pc; $trail2.Stroke = $pc; $trail3.Stroke = $pc
     $status.Text = "$leftClickSettingsCue $statusSeparator $($q.UpdatedAt.ToString('HH:mm:ss'))"
 }
 
@@ -1231,7 +1077,7 @@ $startupSettings = Initialize-OverlayWindowFromSettings
 $initialScalePercent = [int]$startupSettings.ScalePercent
 $initialFriction = [int]$startupSettings.Friction
 
-$script:physicsController = [OverlayPhysicsController]::new(
+$physicsController = [OverlayPhysicsController]::new(
     $window,
     $cardScale,
     $userScale,
@@ -1258,11 +1104,14 @@ $window.ContextMenu = $menu
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(4)
 $timer.Add_Tick({
-    Update-View
+    if (Test-CodexRunning) {
+        if (-not $window.IsVisible) { $window.Show() }
+        Update-View
+    } elseif ($window.IsVisible) { $window.Hide() }
 })
 $timer.Start()
 Update-View
-$window.Show()
+if (Test-CodexRunning) { $window.Show() } else { $window.Hide() }
 [void][Windows.Threading.Dispatcher]::Run()
 $physicsController.Dispose()
 $timer.Stop(); $mutex.ReleaseMutex(); $mutex.Dispose()
